@@ -1,21 +1,50 @@
 from selenium import webdriver
 
 class Driver():
+
+    # default params
+    __params = [
+        '--incognito',
+        '--disable-gpu',
+        '--disable-extensions',
+        '--headless'
+    ]
     
     def __init__(self, *params):
         # TODO: add params validation
+        if params:
+            self.__params = params
 
-        options = webdriver.ChromeOptions()
+        self.options = webdriver.ChromeOptions()        
 
         # iterate through params
-        for p in params:            
-            options.add_argument(p)
+        for p in self.__params:            
+            self.options.add_argument(p)
 
         # add experimental option
-        options.add_experimental_option('excludeSwitches', ['enable-logging'])
+        self.options.add_experimental_option('excludeSwitches', ['enable-logging'])
 
         # create selenium instance
-        self.driver = webdriver.Chrome(options=options)
+        self.driver = webdriver.Chrome(options=self.options)
 
     def get_driver(self):
-        return self.driver    
+        return self.driver  
+
+    def get_params(self):
+        return self.__params
+
+    def destroy(self):
+        return self.driver.quit()
+
+if __name__ == '__main__':
+    params = [
+        '--incognito',
+        '--disable-gpu',
+        '--disable-extensions',
+    ]
+    d = Driver(*params)
+    print(d)
+
+    d2 = Driver()
+    print(d2)
+    print(d2.get_params())

@@ -7,6 +7,9 @@ import constant as c
 import db
 from sqlalchemy.orm import sessionmaker
 from actions import Actions
+import threading
+from objectpool import ObjectPool
+from driver import Driver
 
 class Collector():
     def __init__(self, credentials=None):
@@ -19,17 +22,67 @@ class Collector():
         # initialize db Session
         Session = sessionmaker(db.db)
         self.session = Session()
+        # TODO: add borrow object operation for database connection.
+        
+        # parallel execution properties
+        self.lock_db = threading.Lock()
+        self.threads = []
+        self.pool = None
+        self.max_pool = 10
+        self.max_thread = 10
+        self._thread_index = 0
 
     def __login(self, driver, credentials):
         actions = Actions(driver, credentials)
-        actions.do_login()
+        actions.do_login()    
+
+    def run_thread(self, profile, pool, thread_name):
+        print(f'{thread_name} starting...')
+        # borrow object
+        driver = pool.borrow_resource()
+        
+        # do the job
+        pc = ProfileCollector(driver, profile.profile_link)
+        pc.dump_html()
+        # insert to db with locking operation
+        with self.lock_db:
+            # TODO: add operation to insert filepath and filename too.
+            pc.scrap()
+
+        # return object
+        pool.return_resource(driver)
+        print(f'{thread_name} done.')
+
+        self.__thread_callback()
+
+    def __thread_callback(self):
+        # continue execute threads
+        if self._thread_index < len(self.threads):
+            self.threads[self._thread_index].start()
+            self._thread_index += 1
+
+        # once all threads has been executed.
+        # TODO: write collectorstatus
+
 
     def collect(self, driver, **options):
 
-        # check collector options
+        ###########################
+        # check collector options #
+        ###########################
         skip = None
         if 'skip_my_network' in options:
-            skip = options.get('skip_my_network')            
+            skip = options.get('skip_my_network')   
+
+        self.max_pool = 10
+        if 'max_pool' in options:
+            self.max_pool = options.get('max_pool')
+
+        self.max_thread = 5
+        if 'max_thread' in options:
+            self.max_thread = options.get('max_thread')
+
+
 
         # perform login
         self.__login(driver, self.credentials)
@@ -44,14 +97,37 @@ class Collector():
                                     .filter(db.Connections.connected_with_user_id == self.credentials.get_uid())\
                                     .all()
         
-        # proceed to ProfileCollector        
-        # Execute parallelly.
-        for c in connections:
-            print(c.profile_link)
-            pc = ProfileCollector(driver, c.profile_link)
-            pc.dump_html()
-            pc.scrap()
-            break
+        # create driver pool
+        drivers = []
+        for _ in range(self.max_pool):
+            drivers.append(Driver().get_driver())
+        # object pool
+        self.pool = ObjectPool()
+        self.pool.set_resource(drivers)
+
+        # create thread                
+        for i, item in enumerate(connections[:25]):
+            # init thread
+            thread_name = f'Thread-{i}'
+            t = threading.Thread(target=self.run_thread, args=(item, self.pool, thread_name))
+            t.name = thread_name
+            self.threads.append(t)
+
+        # execute threads w/ max = max_thread        
+        for _ in range(self.max_thread):
+            # run thread
+            self.threads[self._thread_index].start()
+            self._thread_index += 1            
+
+
+        # # proceed to ProfileCollector             
+        # # Execute parallelly.
+        # for c in connections:
+        #     print(c.profile_link)
+        #     pc = ProfileCollector(driver, c.profile_link)
+        #     pc.dump_html()
+        #     pc.scrap()
+        #     break
 
 
 class MyConnectionsCollector(Collector):
@@ -426,3 +502,5 @@ class ProfileCollector(Collector):
         print('Dump profile page...')
         with open(f'raw/{self.profile_link.split("/")[-2]}.html', 'w', encoding='utf-8') as w:
             w.write(str(page))
+
+        # TODO: return filepath and filename
