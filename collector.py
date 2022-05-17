@@ -21,8 +21,8 @@ class Collector():
 
         # initialize db Session
         Session = sessionmaker(db.db)
-        self.session = Session()
-        # TODO: add borrow object operation for database connection.
+        self.session = Session()        
+        self.db_pool = None
         
         # parallel execution properties
         self.lock_db = threading.Lock()
@@ -32,25 +32,31 @@ class Collector():
         self.max_thread = 10
         self._thread_index = 0
 
+    def __generate_task(self):
+        
+        pass
+
     def __login(self, driver, credentials):
         actions = Actions(driver, credentials)
         actions.do_login()    
 
-    def run_thread(self, profile, pool, thread_name):
+    def run_thread(self, profile, pool, db_pool, thread_name):
         print(f'{thread_name} starting...')
         # borrow object
         driver = pool.borrow_resource()
+        session = db_pool.borrow_resource()
         
         # do the job
         pc = ProfileCollector(driver, profile.profile_link)
-        pc.dump_html()
+        fpath, fname = pc.dump_html()
         # insert to db with locking operation
-        with self.lock_db:
-            # TODO: add operation to insert filepath and filename too.
-            pc.scrap()
+        # with self.lock_db:
+        # TODO: add operation to insert filepath and filename too.        
+        pc.scrap(session)
 
         # return object
         pool.return_resource(driver)
+        db_pool.return_resource(session)
         print(f'{thread_name} done.')
 
         self.__thread_callback()
@@ -100,21 +106,40 @@ class Collector():
         # create driver pool
         drivers = []
         for _ in range(self.max_pool):
-            drivers.append(Driver().get_driver())
+            # init driver
+            driver = Driver().get_driver()
+            # perform login
+            action = Actions(driver, self.credentials)
+            action.do_login()
+            # add to pool
+            drivers.append(driver)
+
         # object pool
         self.pool = ObjectPool()
         self.pool.set_resource(drivers)
+        
+        # create db pool
+        dbs = []
+        for _ in range(self.max_pool):
+            Session = sessionmaker(db.db)
+            session = Session()
+            dbs.append(session)
+
+        # object pool
+        self.db_pool = ObjectPool()
+        self.db_pool.set_resource(dbs)
+
 
         # create thread                
         for i, item in enumerate(connections[:25]):
             # init thread
             thread_name = f'Thread-{i}'
-            t = threading.Thread(target=self.run_thread, args=(item, self.pool, thread_name))
+            t = threading.Thread(target=self.run_thread, args=(item, self.pool, self.db_pool, thread_name))
             t.name = thread_name
             self.threads.append(t)
 
         # execute threads w/ max = max_thread        
-        for _ in range(self.max_thread):
+        for _ in range(self.max_thread):            
             # run thread
             self.threads[self._thread_index].start()
             self._thread_index += 1            
@@ -414,7 +439,7 @@ class ProfileCollector(Collector):
 
         return profiles
 
-    def scrap(self):
+    def scrap(self, session):
         # go to profile
         self.__open_page(self.profile_link)
 
@@ -467,7 +492,7 @@ class ProfileCollector(Collector):
         duplicate = 0
         for p in parse_result:
             # prevent duplicate value
-            people = self.session.query(db.Connections)\
+            people = session.query(db.Connections)\
                                 .filter(db.Connections.profile_link == p.profile_link)\
                                 .first()
 
@@ -475,11 +500,11 @@ class ProfileCollector(Collector):
                 duplicate += 1
                 continue
 
-            self.session.add(p)
+            session.add(p)
             counter += 1
         
         try:
-            self.session.commit()
+            session.commit()
         except Exception as e:
             print(e)
 
@@ -500,7 +525,9 @@ class ProfileCollector(Collector):
 
         # write html to file
         print('Dump profile page...')
-        with open(f'raw/{self.profile_link.split("/")[-2]}.html', 'w', encoding='utf-8') as w:
+        filename = f'{self.profile_link.split("/")[-2]}.html'
+        filepath = 'raw'
+        with open(f'{filepath}/{filename}', 'w', encoding='utf-8') as w:
             w.write(str(page))
 
-        # TODO: return filepath and filename
+        return filepath, filename
