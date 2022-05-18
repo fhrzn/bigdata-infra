@@ -13,7 +13,7 @@ if __name__ == '__main__':
     driver = Driver(*params).get_driver()
 
     # scrap and collect data
-    collector = Collector()
+    collector = Collector(max_pool=1, max_thread=1)
     collector.collect(driver, skip_my_network=True)
 
     # driver.quit()

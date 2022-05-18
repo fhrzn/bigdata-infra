@@ -10,9 +10,10 @@ from actions import Actions
 import threading
 from objectpool import ObjectPool
 from driver import Driver
+from datetime import date, datetime
 
 class Collector():
-    def __init__(self, credentials=None):
+    def __init__(self, credentials=None, max_pool=10, max_thread=10):
         
         # initilaize credentials
         self.credentials = credentials
@@ -28,13 +29,28 @@ class Collector():
         self.lock_db = threading.Lock()
         self.threads = []
         self.pool = None
-        self.max_pool = 10
-        self.max_thread = 10
+        self.max_pool = max_pool
+        self.max_thread = max_thread
         self._thread_index = 0
 
-    def __generate_task(self):
-        
-        pass
+        # collector metadata
+        self.collectortask = self.__get_task_id()
+
+    def __get_task_id(self):
+        taskid = date.today().strftime('%Y%m%d')
+
+        # check if task exist
+        t = self.session.query(db.Tasks).filter(db.Tasks.timestamp == taskid).first()
+
+        if t:
+            return t.task_id
+
+        # insert if no task timestamp found
+        task = db.Tasks(timestamp=taskid)
+        self.session.add(task)
+        self.session.commit()
+
+        return task.task_id
 
     def __login(self, driver, credentials):
         actions = Actions(driver, credentials)
@@ -48,10 +64,9 @@ class Collector():
         
         # do the job
         pc = ProfileCollector(driver, profile.profile_link)
-        fpath, fname = pc.dump_html()
+        pc.dump_html(session)
         # insert to db with locking operation
         # with self.lock_db:
-        # TODO: add operation to insert filepath and filename too.        
         pc.scrap(session)
 
         # return object
@@ -79,12 +94,10 @@ class Collector():
         skip = None
         if 'skip_my_network' in options:
             skip = options.get('skip_my_network')   
-
-        self.max_pool = 10
+        
         if 'max_pool' in options:
             self.max_pool = options.get('max_pool')
-
-        self.max_thread = 5
+        
         if 'max_thread' in options:
             self.max_thread = options.get('max_thread')
 
@@ -131,7 +144,7 @@ class Collector():
 
 
         # create thread                
-        for i, item in enumerate(connections[:25]):
+        for i, item in enumerate(connections[:self.max_thread]):
             # init thread
             thread_name = f'Thread-{i}'
             t = threading.Thread(target=self.run_thread, args=(item, self.pool, self.db_pool, thread_name))
@@ -250,9 +263,7 @@ class MyConnectionsCollector(Collector):
 
         # data verification again        
         print(f'Found duplicated {duplicate} data(s)')
-        print(f'Successfully insert {counter}/{total_expected} record(s) to DB. Missing {total_expected - (counter+duplicate)} data(s).')
-
-        # TODO: insert collector log to DB
+        print(f'Successfully insert {counter}/{total_expected} record(s) to DB. Missing {total_expected - (counter+duplicate)} data(s).')        
 
         return parse_result
 
@@ -307,7 +318,7 @@ class ProfileCollector(Collector):
 
         # collector properties
         self.max_tries = max_tries
-        self.profile_link = profile_link
+        self.profile_link = profile_link            
 
     def __open_page(self, url):
         return self._driver.get(url)
@@ -385,9 +396,11 @@ class ProfileCollector(Collector):
     def __get_browser_height(self):
         return self._driver.execute_script('return document.body.scrollHeight')
 
-    def __scroll_to_bottom(self):
+    def __scroll_to_bottom(self, max_tries=3):
         # get current browser height
         last_height = self.__get_browser_height()
+
+        tries = 0
 
         while True:
             # scroll down
@@ -399,7 +412,14 @@ class ProfileCollector(Collector):
 
             # if scroll reached the end
             if new_height == last_height:
-                break
+
+                tries += 1
+
+                if tries == max_tries:
+                    break
+            
+            else:
+                tries = 0
 
             # update last height
             last_height = new_height
@@ -439,14 +459,19 @@ class ProfileCollector(Collector):
 
         return profiles
 
-    def scrap(self, session):
+    def scrap(self, session):     
         # go to profile
-        self.__open_page(self.profile_link)
+        self.__open_page(self.profile_link)    
+        # make sure page is loaded
+        # while True:
+        #     if util.wait_loaded(self._driver):
+        #         break          
 
         self.__find_link_url()
         self.__set_connection_filter()
 
         # get expected result
+        expect_total = None
         try:
             expect_total = util.browser_wait(
                 self._driver, 
@@ -515,7 +540,15 @@ class ProfileCollector(Collector):
         else:
             print(f'Successfully insert {counter}')
 
-    def dump_html(self):
+    def dump_html(self, session):      
+
+        # go to profile
+        self.__open_page(self.profile_link)    
+        # make sure page is loaded
+        while True:
+            if util.wait_loaded(self._driver):
+                break           
+
         # scroll to bottom
         self.__scroll_to_bottom()
 
@@ -527,7 +560,28 @@ class ProfileCollector(Collector):
         print('Dump profile page...')
         filename = f'{self.profile_link.split("/")[-2]}.html'
         filepath = 'raw'
-        with open(f'{filepath}/{filename}', 'w', encoding='utf-8') as w:
-            w.write(str(page))
 
-        return filepath, filename
+        # check if page already scraped
+        taskfile = session.query(db.CollectorTaskFiles)\
+                            .filter(db.CollectorTaskFiles.filename == filename)\
+                            .first()
+
+        if taskfile:
+            # found duplicate
+            return
+
+        # write a new record        
+        with open(f'{filepath}/{filename}', 'w', encoding='utf-8') as w:
+            w.write(str(page))        
+
+        # writing to db
+        collectortaskfiles = db.CollectorTaskFiles(
+            collectortask_id = self.collectortask,
+            filename=filename,
+            filepath=filepath
+        )
+        session.add(collectortaskfiles)
+        try:            
+            session.commit()        
+        except Exception as e:
+            print(e)

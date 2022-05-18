@@ -7,7 +7,7 @@ class Driver():
         '--incognito',
         '--disable-gpu',
         '--disable-extensions',
-        '--headless'
+        # '--headless'
     ]
     
     def __init__(self, *params):

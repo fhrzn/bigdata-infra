@@ -25,9 +25,11 @@ class CollectorStatus(base):
     __tablename__ = 'collectorstatus'
 
     collectorstatus_id = Column(Integer, primary_key=True)
-    collectortask_id = Column(Integer)
+    task_id = Column(Integer)
+    collectortype_id = Column(Integer)
     status = Column(String)
-    created_at = Column(String)
+    started_at = Column(String)
+    finished_at = Column(String)
 
 class CollectorTaskFiles(base):
     __tablename__ = 'collectortaskfiles'
@@ -47,6 +49,12 @@ class Connections(base):
     connected_with_user_id = Column(Integer)
     profile_link = Column(String)
     circle_level = Column(String)
+
+class Tasks(base):
+    __tablename__ = 'tasks'
+
+    task_id = Column(Integer, primary_key=True)
+    timestamp = Column(String)
 
 class User(base):
     __tablename__ = 'user'
