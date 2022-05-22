@@ -23,8 +23,8 @@ class Credentials():
             self.__pwd = os.getenv('PWD')
             # cookies
             try:
-                cookie = os.getenv('LI_AT')
-                if not cookie:
+                cookie = os.getenv('LI_AT')                
+                if cookie:
                     self.__li_at = cookie                    
             except:
                 self.__li_at = None
