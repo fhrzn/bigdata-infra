@@ -169,7 +169,7 @@ class Collector():
 
 
         # create thread                
-        for item in connections[3:4]:
+        for item in connections[5:6]:
             print(item.profile_link)
             # init thread
             # create unique thread id
@@ -576,11 +576,21 @@ class ProfileCollector(Collector):
 
         # parse profile page
         parser = self.ProfileParser(self)
+        print('Getting courses...')
         try:
             courses = parser.parse(kind='course')
             print(courses)
         except Exception as e:
             print(e)
+
+        print('Getting experiences...')
+        try:
+            exps = parser.parse(kind='experience')
+            print(exps)
+        except Exception as e:
+            print(e)
+
+        # enrich data by scrap people's connections
 
         #####################
         # connection parser #
@@ -734,14 +744,13 @@ class ProfileCollector(Collector):
                 if not self.__is_section_available(section_id='licenses_and_certifications'):
                     # if section not found, raise error
                     raise ValueError(f'Section {kind} not found. Possibly caused by user didn\'t put the information.')
-            elif kind == 'experience':
-                raise NotImplementedError('Function not available yet.')
+            elif kind == 'experience':                                
                 parser = self.__experience_parser
                 keyword = 'experience'
                 # analyze targetted section
                 if not self.__is_section_available(keyword):
                     # if section not found, raise error
-                    raise NotFoundError(f'Section {keyword} not found. Possibly caused by user didn\'t put the information.')
+                    raise ValueError(f'Section {keyword} not found. Possibly caused by user didn\'t put the information.')
             elif kind == 'education':
                 raise NotImplementedError('Function not available yet.')
                 parser = self.__education_parser
@@ -768,11 +777,6 @@ class ProfileCollector(Collector):
                     found_btn = True
                     break
 
-            # if section found without button, expected condition:
-            #   TODO: scrap data directly from current page
-            #         then return the output without execute codes below.            
-            #     raise NotFoundError('Targeted button not found!')
-
             # wait opened page fully loaded
             if found_btn:                
                 while True:
@@ -787,6 +791,10 @@ class ProfileCollector(Collector):
             raw_html.prettify()
             outputs = parser(raw_html, found_btn)
 
+            # back to profile page
+            if found_btn:
+                self.driver.back()
+
             return outputs
             
         def __is_section_available(self, section_id):
@@ -795,9 +803,10 @@ class ProfileCollector(Collector):
                     self.driver,
                     section_id,
                     By.ID,
-                    timeout=10
+                    timeout=30
                 )
             except:
+                print(f'{section_id} not found.')
                 return None
 
         def __course_parser(self, raw_html, w_button=True):            
@@ -822,11 +831,59 @@ class ProfileCollector(Collector):
             pass
 
         def __experience_parser(self, raw_html, w_button=True):
-            # TODO: Continue implementation later. Problem: Need to handle nested experience
-            if not w_button:
-                experiences = raw_html.select('#experience + div + div  > ul > li.artdeco-list__item > div > div:nth-child(2) > div > div.display-flex')
-                exp_names = []
-                for exp in experiences:
-                    # experience name
-                    name = exp.select_one('')
+            # get experiences
+            if not w_button:                
+                experiences = raw_html.select('#experience + div + div > ul > li.artdeco-list__item > div > div:nth-child(2)')
+            else:
+                experiences = raw_html.select('ul > li.artdeco-list__item > div > div:nth-child(2) > div > div.display-flex')
+            
+            exp_names = []
+            for exp in experiences:
+                nest = exp.select('div:nth-child(2) > ul > li > div.pvs-entity')
+                if len(nest) > 0:
+                    # nested experience
+                    header = exp.select_one('div > div.display-flex > a')
+                    company = header.select_one('div.display-flex > span > span').text
+                    try:
+                        location = header.select_one('div + span + span > span').text
+                    except:
+                        location = None
+                    # scrap data
+                    for n in nest:
+                        position = n.select_one('div > span > span').text
+                        duration = n.select_one('div + span > span').text
 
+                        item = {
+                            'company': company,
+                            'position': position,
+                            'duration': duration,
+                            'location': location
+                        }
+
+                        exp_names.append(item)
+                else:
+                    # non-nested experience
+                    exp = exp.select_one('div > div.display-flex')
+                    position = exp.select_one('div > span > span').text
+                    company = exp.select_one('div + span > span').text
+                    duration = exp.select_one('div + span + span > span').text
+                    try:
+                        location = exp.select_one('div + span + span + span > span').text
+                    except:
+                        location = None
+
+                    item = {
+                        'company': company,
+                        'position': position,
+                        'duration': duration,
+                        'location': location
+                    }
+
+                    exp_names.append(item)
+
+            return exp_names
+          
+    
+    class ConnectionParser:
+        def __init__(self) -> None:
+            pass
