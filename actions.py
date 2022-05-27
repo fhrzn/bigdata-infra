@@ -48,7 +48,10 @@ class Actions():
         # set li_at cookies
         while True:
             if util.wait_loaded(self.driver):
-                self.credentials.li_at = self.driver.get_cookie('li_at')['value']                
+                try:
+                    self.credentials.li_at = self.driver.get_cookie('li_at')['value']                
+                except:
+                    pass
                 break
 
     def __login_w_cookie(self):

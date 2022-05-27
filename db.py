@@ -5,7 +5,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from constant import DB_URL
 
-db = create_engine(DB_URL, pool_size=100)
+db = create_engine(DB_URL, pool_size=100, pool_recycle=1800)
 base = declarative_base()
 
 # define all table models
@@ -52,6 +52,8 @@ class Connections(base):
     profile_link = Column(String, nullable=True)
     circle_level = Column(String, nullable=True)
     connected_with_connections_id = Column(Integer, nullable=True)
+    is_scraped = Column(Integer, nullable=True)
+    is_parsed = Column(Integer, nullable=True)
 
 class Tasks(base):
     __tablename__ = 'tasks'

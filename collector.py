@@ -1,5 +1,4 @@
 from bs4 import BeautifulSoup
-from sklearn import utils
 from credentials import Credentials
 import util as util
 import time
@@ -12,9 +11,12 @@ import threading
 from objectpool import ObjectPool
 from driver import Driver
 from datetime import date, datetime
+import os
+import json
+import re
 
 class Collector():
-    def __init__(self, credentials=None, max_pool=10, max_thread=10):
+    def __init__(self, credentials=None, max_pool=10, max_thread=10, batch=100, mode=['parse', 'network'], id=None):
         
         # initilaize credentials
         self.credentials = credentials
@@ -25,6 +27,7 @@ class Collector():
         Session = sessionmaker(db.db)
         self.session = Session()        
         self.db_pool = None
+        self.batch = batch
         
         # parallel execution properties
         self.lock_db = threading.Lock()
@@ -34,9 +37,12 @@ class Collector():
         self.max_thread = max_thread
         self._thread_index = 0
         self._thread_finished = 0
+        self.extracted_data = []
 
         # collector metadata
         self.collectortask = self.__get_task_id()
+        self.mode = mode
+        self.id = id
 
     def __get_task_id(self):
         taskid = date.today().strftime('%Y%m%d')
@@ -58,29 +64,31 @@ class Collector():
         actions = Actions(driver, credentials)
         actions.do_login()    
 
-    def run_thread(self, profile, pool, db_pool, thread_name):
+    def run_thread(self, profile, pool, db_pool, thread_name, mode):
         print(f'[{thread_name}] starting...')
         # borrow object
         driver = pool.borrow_resource()
         session = db_pool.borrow_resource()
         
         # do the job
-        pc = ProfileCollector(driver, profile, session, self.collectortask, thread_name=thread_name)
+        pc = ProfileCollector(driver, profile, session, self.collectortask, credentials=self.credentials, thread_name=thread_name, mode=mode)
         # pc.dump_html()
         # insert to db with locking operation
         # with self.lock_db:
-        pc.scrap()
+        data = pc.scrap()
 
         # return object
         pool.return_resource(driver)
         db_pool.return_resource(session)
         print(f'[{thread_name}] done.')
 
-        self.__thread_callback()
+        self.__thread_callback(data)
 
-    def __thread_callback(self):
+    def __thread_callback(self, data):
         # continue execute threads
         with self.lock_db:
+            if 'parse' in self.mode:
+                self.extracted_data.append(data)
             self._thread_finished += 1
             if self._thread_index < len(self.threads):
                 self.threads[self._thread_index].start()
@@ -91,6 +99,17 @@ class Collector():
             if self._thread_finished == len(self.threads):
                 print('All thread has been executed!')
 
+    def __write_to_file(self, data, filename='data.json'):
+        with open(filename, 'w+', encoding='utf-8') as f:
+            if os.path.exists(filename):
+                json.dump({'data': data}, f)
+                print(f'Data saved to {filename} successfully.')
+            else:
+                old_data = json.load(f)
+                old_data['data'].extend(data)
+                f.seek(0)
+                json.dump(data, f, indent=4)
+                print(f'File {filename} updated successfully.')
 
     def collect(self, driver, **options):
 
@@ -116,11 +135,20 @@ class Collector():
         if not skip:
             my_connection = MyConnectionsCollector(driver)
             connections = my_connection.scrap()
-        else:
-            print('Getting list connections from db...')
+        # else:
+        print('Getting list connections from db...')
+        if not self.id:
             connections = self.session.query(db.Connections)\
-                                    .filter(db.Connections.connected_with_user_id == self.credentials.get_uid())\
-                                    .all()
+                                .filter(db.Connections.is_scraped == '0')\
+                                .limit(self.batch)\
+                                .all()
+        else:
+            connections = self.session.query(db.Connections)\
+                                .filter(db.Connections.connections_id == self.id)\
+                                .all()
+
+
+        print(len(connections))        
         
         # create driver pool
         drivers = []
@@ -169,7 +197,7 @@ class Collector():
 
 
         # create thread                
-        for item in connections[5:6]:
+        for item in connections[:self.batch]:
             print(item.profile_link)
             # init thread
             # create unique thread id
@@ -178,7 +206,7 @@ class Collector():
                 thread_name = proflink[0][:5]
             else:
                 thread_name = ''.join([item[:2] for item in proflink])
-            t = threading.Thread(target=self.run_thread, args=(item, self.pool, self.db_pool, thread_name))
+            t = threading.Thread(target=self.run_thread, args=(item, self.pool, self.db_pool, thread_name, self.mode))
             t.name = thread_name
             self.threads.append(t)
 
@@ -190,6 +218,9 @@ class Collector():
 
         for t in self.threads:
             t.join()
+
+        print(f'Got {len(self.extracted_data)}/{self.batch} processed.')
+        self.__write_to_file(self.extracted_data)
 
         # shutdown all drivers
         print('Cleaning resources...')
@@ -232,7 +263,7 @@ class MyConnectionsCollector(Collector):
         print('Scrolling...')
         while True:
             # scroll down
-            util.scroll(self._driver)
+            util._scroll(self._driver)
             time.sleep(2)
             
             # get new height
@@ -299,7 +330,8 @@ class MyConnectionsCollector(Collector):
                     connected_at=connected_at,
                     connected_with_user_id=self.credentials.get_uid(),
                     profile_link=profile_link,
-                    circle_level=1  # default to 1 cz we're scraped from My Network page
+                    circle_level=1,  # default to 1 cz we're scraped from My Network page
+                    is_scraped=0
                 )
             )
 
@@ -350,11 +382,13 @@ class MyConnectionsCollector(Collector):
 
 
 class ProfileCollector(Collector):
-    def __init__(self, driver, profile, session, taskid, credentials=None, max_tries=3, thread_name='Default_name'):
+    def __init__(self, driver, profile, session, taskid, credentials=None, max_tries=3, thread_name='Default_name', mode=['parse', 'network']):
         super().__init__(credentials)
 
         self.profile = profile
         self.session = session
+        self.credentials = credentials
+        self.mode = mode
         
         # chromedriver
         self._driver = driver
@@ -375,118 +409,13 @@ class ProfileCollector(Collector):
             finished_at = None
         )
         self.session.add(self.status)
-        self.session.commit()
+        self.session.flush()
 
     def __open_page(self, url):
         return self._driver.get(url)
 
     def __log(self, message):
-        print(f'[{self.thread_name}] {message}')
-
-    def __find_connections_url(self):
-        try:
-            # search connections link
-            link = util.browser_wait(
-                self._driver,
-                'li.text-body-small:nth-child(2)',
-                locator=By.CSS_SELECTOR,
-                timeout=30
-            )
-            link.click()
-        except:
-            self.__log('Trying another solution')
-
-        try:
-            # search connections link
-            link = util.browser_wait(
-                self._driver,
-                'li.text-body-small > a',
-                locator=By.CSS_SELECTOR,
-                timeout=30
-            )
-            link.click()
-        except:
-            self.__log('Connections link not found in profile.')
-
-    def __set_connection_filter(self):
-        try:
-            # trigger filter dropdown
-            filter_btn = util.browser_wait(
-                self._driver, 
-                'div.search-reusables__filter-trigger-and-dropdown:nth-child(1)', 
-                By.CSS_SELECTOR, 
-                timeout=30
-            )
-            filter_btn.click()
-
-            # disable 1st circle connection
-            first_circle = util.browser_wait(
-                self._driver, 
-                'li.search-reusables__collection-values-item:nth-child(1) > label', 
-                By.CSS_SELECTOR, 
-                timeout=30
-            )
-            first_circle.click()
-
-            # enable 3rd circle connection
-            third_circle = util.browser_wait(
-                self._driver, 
-                'li.search-reusables__collection-values-item:nth-child(3) > label', 
-                By.CSS_SELECTOR, 
-                timeout=30
-            )
-            third_circle.click()
-
-            # submit option
-            submit = util.browser_wait(self._driver, '/html/body/div[7]/div[3]/div[2]/section/div/nav/div/ul/li[3]/div/div/div/div[1]/div/form/fieldset/div[2]/button[2]')
-            trials = 0
-            while not submit or trials < 4:
-                filter_btn.click()
-                filter_btn.click()
-                submit = util.browser_wait(self._driver, '/html/body/div[7]/div[3]/div[2]/section/div/nav/div/ul/li[3]/div/div/div/div[1]/div/form/fieldset/div[2]/button[2]')
-                trials += 1
-            submit.click()
-            return True
-        except:
-            self.__log('There is a problem when we trying to filter connection to 2nd and 3rd circle.')
-            return False
-
-    def __next_connection_page(self, max_tries=3):
-        for i in range(max_tries):
-            try:
-                btn_class = 'button.artdeco-pagination__button--next'
-                # click next button
-                next_btn = util.browser_wait(
-                    self._driver,
-                    btn_class,
-                    locator=By.CSS_SELECTOR,
-                    timeout=30
-                )
-                # check if button is clickable
-                is_disabled = self._driver.execute_script(
-                    f'return document.querySelector("{btn_class}").classList.contains("artdeco-button--disabled")'
-                )
-                # next_btn = util.is_element_clickable(
-                #     self._driver, 
-                #     'button.artdeco-pagination__button--next',
-                #     locator=By.CSS_SELECTOR,
-                #     timeout=50
-                # )
-
-                if not is_disabled:
-                    # button still clickable
-                    next_btn.click()
-                    return 'NEXT_PAGE'
-                else:
-                    return 'END_PAGE'
-
-
-            except:
-                self.__log(f'Cannot click the button. Trying again... ({i+1})')
-    
-        # if i+1 == max_tries:
-        self.__log('Seems we\'re reached the end of pagination. Start inserting to db now...')
-        return 'END_PAGE'
+        print(f'[{self.thread_name}] {message}')            
 
     def __get_browser_height(self):
         return self._driver.execute_script('return document.body.scrollHeight')
@@ -518,166 +447,82 @@ class ProfileCollector(Collector):
 
             # update last height
             last_height = new_height
-
-    def _parse_connection(self, raw_html):
-        # get all container items
-        containers = raw_html.findAll(
-            'div', {'class': 'entity-result__item'}
-        )
-        # count total expected connections
-        expected_connections = len(containers)
-
-        # create empty array to store result
-        profiles = []
-
-        # get all connection
-        for c in containers:
-            heading = c.find('span', {'class': 'entity-result__title-text t-16'})    
-            # data model
-            try:
-                name = heading.find('span', {'dir': 'ltr'}).span.text
-            except:
-                try:
-                    name = heading.find('span', {'dir': 'ltr'}).span.text
-                except:
-                    print('Cannot find name field.')
-                    name = None
-                
-            circle_level = heading.find('span', {'class': 'image-text-lockup__text entity-result__badge-text'}).span.text.split()[-1][0]
-            profile_link = heading.a['href']
-            try:
-                occupation = c.find('div', {'class': 'entity-result__primary-subtitle t-14 t-black t-normal'}).text.strip()
-            except:
-                occupation = None
-
-            profiles.append(
-                db.Connections(
-                    name=name,
-                    occupation=occupation,
-                    connected_with_user_id=self.credentials.get_uid(),
-                    profile_link=profile_link,
-                    circle_level=circle_level,
-                    connected_with_connections_id = self.profile.connections_id
-                )
-            )
-
-        # data verification
-        self.__log(f'Got {len(profiles)}/{expected_connections} connections in this page. Missing {expected_connections-len(profiles)} data(s).')
-
-        return profiles
-
+    
     def scrap(self,):     
         # go to profile
         self.__open_page(self.profile_link)    
         # make sure page is loaded
         while True:
             if util.wait_loaded(self._driver):
-                break
+                break        
 
-        # parse profile page
-        parser = self.ProfileParser(self)
-        print('Getting courses...')
-        try:
-            courses = parser.parse(kind='course')
-            print(courses)
-        except Exception as e:
-            print(e)
+        if 'parse' in self.mode:
+            # parse profile page
+            parser = self.ProfileParser(self)
+            self.__log('Getting courses...')
+            try:
+                courses = parser.parse(kind='course')
+                # self.__log(courses)
+            except Exception as e:
+                self.__log(e)
+                courses = None
 
-        print('Getting experiences...')
-        try:
-            exps = parser.parse(kind='experience')
-            print(exps)
-        except Exception as e:
-            print(e)
+            self.__log('Getting experiences...')
+            try:
+                exps = parser.parse(kind='experience')
+                # self.__log(exps)
+            except Exception as e:
+                self.__log(e)
+                exps = None
 
-        # enrich data by scrap people's connections
+        if 'network' in self.mode:
+            # enrich data by scrap people's connections               
+            conn_parser = self.ConnectionParser(self)
+            self.__log(f'Getting {self.thread_name} connection(s)...')
+            conn_parser.parse()
 
-        #####################
-        # connection parser #
-        #####################
-        # self.__find_connections_url()
-        # self.__set_connection_filter()
-        # # cfilter = False
-        # # for _ in range (3):
-        # #     if cfilter:
-        # #         break
+            self.profile.is_scraped='1'
+            self.session.query(db.Connections)\
+                        .filter(db.Connections.connections_id == self.profile.connections_id)\
+                        .update({'is_scraped': '1'}, synchronize_session=False)
+            self.session.flush()
 
-        # # get expected result
-        # expect_total = None
-        # try:
-        #     expect_total = util.browser_wait(
-        #         self._driver, 
-        #         '/html/body/div[7]/div[3]/div[2]/div/div[1]/main/div/div/h2'
-        #     )
-        #     expect_total = int(expect_total.text.split()[0])
-        # except:
-        #     self.__log('[WARNING] Failed to get expected total result.')
-
-        # # connections puller
-        # parse_result = []
-
-        # while True:
-
-        #     # get raw output
-        #     raw = BeautifulSoup(self._driver.page_source.encode('utf-8'), 'lxml')
-        #     raw.prettify()
-
-        #     # scrap connections in current page
-        #     profiles = self._parse_connection(raw)
-        #     # add scraped connections to puller array
-        #     parse_result.extend(profiles)
-
-        #     # scroll to bottom
-        #     self.__scroll_to_bottom(end_scroll=1000)
-        #     # try to click next button
-        #     state = self.__next_connection_page(self.max_tries)
-
-        #     if state == 'END_PAGE':
-        #         break
-
-        #     # wait several seconds
-        #     time.sleep(5)
-
-        # # data verification
-        # if expect_total:
-        #     self.__log(f'Successfully scraped {len(parse_result)}/{expect_total} connection(s). Missing {expect_total - len(parse_result)} data(s).')
-        # else:
-        #     self.__log(f'Successfully scraped {len(parse_result)} connection(s).')
-    
-        # # insert data
-        # counter = 0
-        # duplicate = 0
-        # for p in parse_result:
-        #     # prevent duplicate value
-        #     people = self.session.query(db.Connections)\
-        #                         .filter(db.Connections.profile_link == p.profile_link)\
-        #                         .first()
-
-        #     if people:
-        #         duplicate += 1
-        #         continue
-
-        #     self.session.add(p)
-        #     counter += 1
-        
-        # try:
-        #     self.session.commit()
-        # except Exception as e:
-        #     self.__log(e)
-
-        # # data verification again
-        # self.__log(f'Found duplicated {duplicate} data(s)')
-        # if expect_total:
-        #     self.__log(f'Successfully insert {counter}/{expect_total}')
-        # else:
-        #     self.__log(f'Successfully insert {counter}')
+        # update profile scraped status
+        # self.profile.is_scraped='1'
+        # self.session.query(db.Connections)\
+        #             .filter(db.Connections.connections_id == self.profile.connections_id)\
+        #             .update({'is_scraped': '1'}, synchronize_session=False)
+        # self.session.flush()
 
 
-        # # update status
-        # self.status.status = 'Finished'
-        # self.status.finished_at = datetime.now().strftime('%Y%m%d %H:%M:%S')
-        # # add to db
-        # self.session.commit()
+        # update status
+        self.status.status = 'Finished'
+        self.status.finished_at = datetime.now().strftime('%Y%m%d %H:%M:%S')
+        self.session.flush()
+        # add to db
+
+        # return dictionary consist of profile's data
+        if 'parse' in self.mode:
+            self.profile.is_parsed='1'
+            self.session.query(db.Connections)\
+                        .filter(db.Connections.connections_id == self.profile.connections_id)\
+                        .update({'is_parsed': '1'}, synchronize_session=False)
+            self.session.flush()
+            self.session.commit()
+
+            return {
+                'name': self.profile.name if self.profile.name is not None else None,
+                'occupation': self.profile.occupation,
+                'profile_link': self.profile.profile_link,
+                'circle_level': self.profile.circle_level,
+                'connected_w_user_id': self.profile.connected_with_user_id,
+                'connected_w_connection_id': self.profile.connected_with_connections_id if self.profile.connected_with_connections_id is not None else None,
+                'experiences': exps,
+                'courses': courses
+            }
+        else:
+            self.session.commit()
+
 
     def dump_html(self):      
 
@@ -734,23 +579,24 @@ class ProfileCollector(Collector):
 
             self.driver = self.outerclass._driver
             self.max_tries = self.outerclass.max_tries
+            self.thread_name = self.outerclass.thread_name
 
         def parse(self, kind='course'):
             # find button and click
             if kind == 'course':                        
                 parser = self.__course_parser
-                keyword = 'license'
+                keyword = 'licenses & certifications'
                 # analyze targetted section
                 if not self.__is_section_available(section_id='licenses_and_certifications'):
                     # if section not found, raise error
-                    raise ValueError(f'Section {kind} not found. Possibly caused by user didn\'t put the information.')
+                    raise ValueError(f'[{self.thread_name}] Section {kind} not found. Possibly caused by user didn\'t put the information.')
             elif kind == 'experience':                                
                 parser = self.__experience_parser
-                keyword = 'experience'
+                keyword = 'experiences'
                 # analyze targetted section
-                if not self.__is_section_available(keyword):
+                if not self.__is_section_available(kind):
                     # if section not found, raise error
-                    raise ValueError(f'Section {keyword} not found. Possibly caused by user didn\'t put the information.')
+                    raise ValueError(f'[{self.thread_name}] Section {keyword} not found. Possibly caused by user didn\'t put the information.')
             elif kind == 'education':
                 raise NotImplementedError('Function not available yet.')
                 parser = self.__education_parser
@@ -758,24 +604,33 @@ class ProfileCollector(Collector):
                 # analyze targetted section
                 if not self.__is_section_available(keyword):
                     # if section not found, raise error
-                    raise NotFoundError(f'Section {keyword} not found. Possibly caused by user didn\'t put the information.')
+                    raise NotFoundError(f'[{self.thread_name}] Section {keyword} not found. Possibly caused by user didn\'t put the information.')
             else:
                 raise SyntaxError(f'Parser type {kind} not supported! There are only \'course\', \'experience\', \'education\'.')
             
             # find suitable button            
             buttons = util.browser_wait_multi(
                 self.driver,
-                'a.optional-action-target-wrapper.artdeco-button.artdeco-button--tertiary > span.pvs-navigation__text',
+                'a.optional-action-target-wrapper.artdeco-button.artdeco-button--tertiary',
                 By.CSS_SELECTOR,
                 timeout=30
             )
             found_btn = False
             for btn in buttons:
-                if keyword in btn.text:                    
-                    # best case
-                    btn.click()
+                span = btn.find_element(By.CSS_SELECTOR, 'span.pvs-navigation__text')
+                re_format = f'\d+ {keyword}$'
+                if re.compile(re_format).search(span.text):
+                    try:
+                        btn.click()
+                    except:
+                        self.driver.get(btn.get_attribute('href'))
                     found_btn = True
                     break
+                # if keyword in btn.text:                    
+                #     # best case
+                #     btn.click()
+                #     found_btn = True
+                #     break
 
             # wait opened page fully loaded
             if found_btn:                
@@ -796,6 +651,9 @@ class ProfileCollector(Collector):
                 self.driver.back()
 
             return outputs
+
+        def __log(self, message):
+            print(f'[{self.thread_name}] {message}')
             
         def __is_section_available(self, section_id):
             try:
@@ -806,7 +664,7 @@ class ProfileCollector(Collector):
                     timeout=30
                 )
             except:
-                print(f'{section_id} not found.')
+                self.__log(f'{section_id} not found.')
                 return None
 
         def __course_parser(self, raw_html, w_button=True):            
@@ -821,8 +679,14 @@ class ProfileCollector(Collector):
                 # course name
                 name = c.select_one('div > span > span').text
                 # issuing organization
-                # organization = c.select_one('div + span > span').text
-                course_names.append(name)
+                organization = c.select_one('div + span > span').text
+
+                item = {
+                    'course': name,
+                    'organization': organization
+                }
+
+                course_names.append(item)
             
             return course_names
 
@@ -835,7 +699,7 @@ class ProfileCollector(Collector):
             if not w_button:                
                 experiences = raw_html.select('#experience + div + div > ul > li.artdeco-list__item > div > div:nth-child(2)')
             else:
-                experiences = raw_html.select('ul > li.artdeco-list__item > div > div:nth-child(2) > div > div.display-flex')
+                experiences = raw_html.select('ul > li.artdeco-list__item > div > div:nth-child(2)')
             
             exp_names = []
             for exp in experiences:
@@ -885,5 +749,280 @@ class ProfileCollector(Collector):
           
     
     class ConnectionParser:
-        def __init__(self) -> None:
-            pass
+        def __init__(self, outerclass) -> None:
+            # to access some function from parent class
+            self.outerclass = outerclass
+
+            self.driver = self.outerclass._driver
+            self.thread_name = self.outerclass.thread_name
+            self.session = self.outerclass.session
+            self.max_tries = self.outerclass.max_tries
+            self.credentials = self.outerclass.credentials
+            self.profile = self.outerclass.profile
+
+        def __log(self, message):
+            print(f'[{self.thread_name}] {message}')
+
+        def __find_connections_url(self):
+            # sroll to top
+            util._scroll(self.driver, 0, 100)
+            try:
+                # search connections link
+                link = util.browser_wait(
+                    self.driver,
+                    'li.text-body-small:nth-child(2)',
+                    locator=By.CSS_SELECTOR,
+                    timeout=30
+                )
+                link.click()
+            except:
+                self.__log('Trying another solution')
+
+            try:
+                # search connections link
+                link = util.browser_wait(
+                    self.driver,
+                    'li.text-body-small > a',
+                    locator=By.CSS_SELECTOR,
+                    timeout=30
+                )
+                link.click()
+            except:
+                self.__log('Connections link not found in profile.')
+
+        def __set_connection_filter(self):
+            try:
+                # trigger filter dropdown
+                filter_btn = util.browser_wait(
+                    self.driver, 
+                    'div.search-reusables__filter-trigger-and-dropdown:nth-child(1)', 
+                    By.CSS_SELECTOR, 
+                    timeout=30
+                )
+                filter_btn.click()
+
+                # disable 1st circle connection
+                first_circle = util.browser_wait(
+                    self.driver, 
+                    'li.search-reusables__collection-values-item:nth-child(1) > label', 
+                    By.CSS_SELECTOR, 
+                    timeout=30
+                )
+                first_circle.click()
+
+                # enable 3rd circle connection
+                third_circle = util.browser_wait(
+                    self.driver, 
+                    'li.search-reusables__collection-values-item:nth-child(3) > label', 
+                    By.CSS_SELECTOR, 
+                    timeout=30
+                )
+                third_circle.click()
+
+                # submit option
+                submit = util.browser_wait(self.driver, '/html/body/div[7]/div[3]/div[2]/section/div/nav/div/ul/li[3]/div/div/div/div[1]/div/form/fieldset/div[2]/button[2]')
+                trials = 0
+                while not submit or trials < self.max_tries:
+                    filter_btn.click()
+                    filter_btn.click()
+                    submit = util.browser_wait(self.driver, '/html/body/div[7]/div[3]/div[2]/section/div/nav/div/ul/li[3]/div/div/div/div[1]/div/form/fieldset/div[2]/button[2]')
+                    trials += 1
+                submit.click()
+                return True
+            except:
+                self.__log('There is a problem when we trying to filter connection to 2nd and 3rd circle.')
+                return False
+
+        def __next_connection_page(self, max_tries=3):
+            for i in range(max_tries):
+                try:
+                    btn_class = 'button.artdeco-pagination__button--next'
+                    # click next button
+                    next_btn = util.browser_wait(
+                        self.driver,
+                        btn_class,
+                        locator=By.CSS_SELECTOR,
+                        timeout=30
+                    )
+                    # check if button is clickable
+                    is_disabled = self.driver.execute_script(
+                        f'return document.querySelector("{btn_class}").classList.contains("artdeco-button--disabled")'
+                    )
+                    # next_btn = util.is_element_clickable(
+                    #     self.driver, 
+                    #     'button.artdeco-pagination__button--next',
+                    #     locator=By.CSS_SELECTOR,
+                    #     timeout=50
+                    # )
+
+                    if not is_disabled:
+                        # button still clickable
+                        next_btn.click()
+                        return 'NEXT_PAGE'
+                    else:
+                        return 'END_PAGE'
+
+
+                except:
+                    self.__log(f'Cannot click the button. Trying again... ({i+1})')
+        
+            # if i+1 == max_tries:
+            self.__log('Seems we\'re reached the end of pagination. Start inserting to db now...')
+            return 'END_PAGE'
+        
+        def _parse_connection(self, raw_html):
+            # get all container items
+            containers = raw_html.findAll(
+                'div', {'class': 'entity-result__item'}
+            )
+            # count total expected connections
+            expected_connections = len(containers)
+
+            # create empty array to store result
+            profiles = []
+            duplicate = 0
+
+            # get all connection
+            for c in containers:
+                heading = c.find('span', {'class': 'entity-result__title-text t-16'})    
+                # data model
+                try:
+                    name = heading.find('span', {'dir': 'ltr'}).span.text
+                except:
+                    try:
+                        name = heading.find('span', {'dir': 'rtl'}).span.text
+                    except:
+                        print('Cannot find name field.')
+                        name = None
+                    
+                circle_level = heading.find('span', {'class': 'image-text-lockup__text entity-result__badge-text'}).span.text.split()[-1][0]
+                profile_link = heading.a['href']
+                try:
+                    occupation = c.find('div', {'class': 'entity-result__primary-subtitle t-14 t-black t-normal'}).text.strip()
+                except:
+                    occupation = None
+
+                profiles.append(
+                    db.Connections(
+                        name=name,
+                        occupation=occupation,
+                        connected_with_user_id=self.credentials.get_uid(),
+                        profile_link=profile_link,
+                        circle_level=circle_level,
+                        connected_with_connections_id = self.profile.connections_id
+                    )
+                )
+
+                # insert directly to db
+                ## prevent duplicate value                
+                people = self.session.query(db.Connections)\
+                                    .filter(db.Connections.profile_link == profile_link)\
+                                    .first()
+                if people:
+                    duplicate += 1
+                    continue
+
+                self.session.add(
+                    db.Connections(
+                        name=name,
+                        occupation=occupation,
+                        connected_with_user_id=self.credentials.get_uid(),
+                        profile_link=profile_link,
+                        circle_level=circle_level,
+                        connected_with_connections_id = self.profile.connections_id
+                    )
+                )
+
+                try:
+                    self.session.commit()
+                except Exception as e:
+                    self.__log(e)
+
+            # data verification
+            self.__log(f'Got {len(profiles)-duplicate}/{expected_connections} connections. Missing {expected_connections-len(profiles)}. Duplicate(s) {duplicate}/{len(profiles)}')
+
+            return profiles
+
+
+        def parse(self):
+            #####################
+            # connection parser #
+            #####################
+            self.__find_connections_url()
+            self.__set_connection_filter()
+            # cfilter = False
+            # for _ in range (3):
+            #     if cfilter:
+            #         break
+
+            # get expected result
+            expect_total = None
+            try:
+                expect_total = util.browser_wait(
+                    self.driver, 
+                    '/html/body/div[7]/div[3]/div[2]/div/div[1]/main/div/div/h2'
+                )
+                expect_total = int(expect_total.text.split()[0])
+            except:
+                self.__log('[WARNING] Failed to get expected total result.')
+
+            # connections puller
+            parse_result = []
+
+            while True:
+
+                # get raw output
+                raw = BeautifulSoup(self.driver.page_source.encode('utf-8'), 'lxml')
+                raw.prettify()
+
+                # scrap connections in current page
+                profiles = self._parse_connection(raw)
+                # add scraped connections to puller array
+                parse_result.extend(profiles)
+
+                # scroll to bottom
+                util.scroll_to_bottom(self.driver, end=1000)
+                # try to click next button
+                state = self.__next_connection_page(self.max_tries)
+
+                if state == 'END_PAGE':
+                    break
+
+                # wait several seconds
+                time.sleep(5)
+
+            # data verification
+            if expect_total:
+                self.__log(f'Successfully scraped {len(parse_result)}/{expect_total} connection(s). Missing {expect_total - len(parse_result)} data(s).')
+            else:
+                self.__log(f'Successfully scraped {len(parse_result)} connection(s).')
+        
+            # insert data
+            # counter = 0
+            # duplicate = 0
+            # for p in parse_result:
+            #     # prevent duplicate value
+            #     people = self.session.query(db.Connections)\
+            #                         .filter(db.Connections.profile_link == p.profile_link)\
+            #                         .first()
+
+            #     if people:
+            #         duplicate += 1
+            #         continue
+
+            #     self.session.add(p)
+            #     counter += 1
+            
+            # try:
+            #     self.session.commit()
+            # except Exception as e:
+            #     self.__log(e)
+
+            # data verification again
+            # self.__log(f'Found duplicated {duplicate} data(s)')
+            # if expect_total:
+            #     self.__log(f'Successfully insert {counter}/{expect_total}')
+            # else:
+            #     self.__log(f'Successfully insert {counter}')
+
+

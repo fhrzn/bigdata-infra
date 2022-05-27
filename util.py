@@ -36,7 +36,7 @@ def scroll_to_bottom(driver, start=0, end='document.body.sccrollHeight', load_mo
 
     while True:
         # scroll down
-        _scroll(driver)
+        _scroll(driver, start=start, end=end)
         time.sleep(2)
         # get new height
         new_height = get_browser_height(driver)

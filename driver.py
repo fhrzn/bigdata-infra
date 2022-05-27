@@ -27,6 +27,10 @@ class Driver():
         # create selenium instance
         self.driver = webdriver.Chrome(options=self.options)
 
+    @classmethod
+    def set_default_params(cls, params):
+        cls.__params = params
+
     def get_driver(self):
         return self.driver  
 

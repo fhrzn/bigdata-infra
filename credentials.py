@@ -11,6 +11,7 @@ class Credentials():
         self.__email = email
         self.__pwd = pwd
         self.__li_at = None       
+        self.__id = None
 
         # initialize db Session
         Session = sessionmaker(db.db)
@@ -39,13 +40,18 @@ class Credentials():
 
 
     def get_uid(self):
-        user = self.session.query(db.User)\
-                            .filter(db.User.email == self.email).first()
+        if not self.__id:
+            user = self.session.query(db.User)\
+                                .filter(db.User.email == self.email).first()
 
-        if not user:
-            user = self.insert_user()
+            if not user:
+                user = self.insert_user()
 
-        return user.user_id
+            self.__id = user.user_id
+
+            return user.user_id
+        else:
+            return self.__id
 
     def insert_user(self):
         user = db.User(email=self.email)
