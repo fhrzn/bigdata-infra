@@ -88,7 +88,8 @@ class Collector():
         # continue execute threads
         with self.lock_db:
             if 'parse' in self.mode:
-                self.extracted_data.append(data)
+                self.__write_to_file([data])
+                # self.extracted_data.append(data)
             self._thread_finished += 1
             if self._thread_index < len(self.threads):
                 self.threads[self._thread_index].start()
@@ -229,7 +230,7 @@ class Collector():
             t.join()
 
         print(f'Got {len(self.extracted_data)}/{self.batch} processed.')
-        self.__write_to_file(self.extracted_data)
+        # self.__write_to_file(self.extracted_data)
 
         # shutdown all drivers
         print('Cleaning resources...')
