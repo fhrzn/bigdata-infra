@@ -100,16 +100,18 @@ class Collector():
                 print('All thread has been executed!')
 
     def __write_to_file(self, data, filename='data.json'):
-        with open(filename, 'w+', encoding='utf-8') as f:
-            if os.path.exists(filename):
+
+        if os.path.exists(filename):
+            with open(filename, 'r+', encoding='utf-8') as r:
+                old_data = json.load(r)
+                old_data['data'].extend(data)
+                r.seek(0)
+                json.dump(old_data, r, indent=4)
+                print(f'File {filename} updated successfully.')
+        else:
+            with open(filename, 'w+', encoding='utf-8') as f:
                 json.dump({'data': data}, f)
                 print(f'Data saved to {filename} successfully.')
-            else:
-                old_data = json.load(f)
-                old_data['data'].extend(data)
-                f.seek(0)
-                json.dump(data, f, indent=4)
-                print(f'File {filename} updated successfully.')
 
     def collect(self, driver, **options):
 
@@ -138,10 +140,17 @@ class Collector():
         # else:
         print('Getting list connections from db...')
         if not self.id:
-            connections = self.session.query(db.Connections)\
+            if 'parse' in self.mode:
+                connections = self.session.query(db.Connections)\
+                                .filter(db.Connections.is_parsed == '0')\
+                                .limit(self.batch)\
+                                .all()
+            else:
+                connections = self.session.query(db.Connections)\
                                 .filter(db.Connections.is_scraped == '0')\
                                 .limit(self.batch)\
                                 .all()
+
         else:
             connections = self.session.query(db.Connections)\
                                 .filter(db.Connections.connections_id == self.id)\
