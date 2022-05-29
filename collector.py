@@ -154,7 +154,7 @@ class Collector():
 
         else:
             connections = self.session.query(db.Connections)\
-                                .filter(db.Connections.connections_id == self.id)\
+                                .filter(db.Connections.connections_id.in_(self.id))\
                                 .all()
 
 
@@ -714,7 +714,9 @@ class ProfileCollector(Collector):
             exp_names = []
             for exp in experiences:
                 nest = exp.select('div:nth-child(2) > ul > li > div.pvs-entity')
-                if len(nest) > 0:
+                nest2 = exp.select('div:nth-child(2) > ul > li > div > div > div > ul > li > div.pvs-entity')
+                if len(nest) > 0 or len(nest2) > 0:
+                    nest = nest if len(nest) > 0 else nest2
                     # nested experience
                     header = exp.select_one('div > div.display-flex > a')
                     company = header.select_one('div.display-flex > span > span').text
@@ -740,7 +742,15 @@ class ProfileCollector(Collector):
                     exp = exp.select_one('div > div.display-flex')
                     position = exp.select_one('div > span > span').text
                     company = exp.select_one('div + span > span').text
-                    duration = exp.select_one('div + span + span > span').text
+                    try:
+                        duration = exp.select_one('div + span + span > span').text
+                    except:
+                        if 'mos' in company or 'yrs' in company or 'mo' in company:                    
+                            duration = company
+                            company = position
+                            position = None
+                        else:
+                            duration = None
                     try:
                         location = exp.select_one('div + span + span + span > span').text
                     except:
