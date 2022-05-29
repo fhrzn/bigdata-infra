@@ -12,7 +12,7 @@ if __name__ == '__main__':
     parser.add_argument('-b', '--batch', type=int)
     parser.add_argument('--network-only', action='store_true')
     parser.add_argument('--parse-only', action='store_true')
-    parser.add_argument('-id', '--id', type=int)
+    parser.add_argument('-id', '--id', nargs='+', type=int)
 
     args = parser.parse_args()
 
